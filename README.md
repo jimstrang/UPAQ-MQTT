@@ -1,0 +1,85 @@
+# UniFi Protect Air Quality → MQTT
+
+A tiny bridge that pulls readings from the **Ubiquiti UP-AirQuality** (Vape
+Detection & Air Quality Sensor) out of UniFi Protect and publishes them to MQTT
+using **Home Assistant MQTT Discovery** — so the sensor and its LED controls
+show up in Home Assistant automatically.
+
+It exists because, as of mid-2026, the native Home Assistant `unifiprotect`
+integration doesn't surface this device's data yet (the values stream over
+Protect's WebSocket, but the `uiprotect` library doesn't model them). See
+[home-assistant/core discussion #4047](https://github.com/orgs/home-assistant/discussions/4047).
+Use this in the meantime; once native support lands you can switch over.
+
+## What you get in Home Assistant
+
+One device, **Protect Air Quality**, with:
+
+**Sensors** — CO₂, AQI, Vape Index, VOC Index, TVOC, PM1.0, PM2.5, PM4.0,
+PM10, Temperature, Humidity (each with a `status` attribute, e.g. `neutral`).
+
+**Controls** (config entities):
+- LED Brightness (0–100) and LED Metric (Air Quality / CO₂)
+- Status Light on/off
+- Night Mode on/off and Night Mode Brightness
+- Per-metric low/high alert thresholds
+
+**Diagnostics** — Firmware Version, Firmware Update Available.
+
+## Requirements
+
+- Docker + Docker Compose
+- A UniFi Protect controller with the UP-AirQuality adopted, and a **local
+  account** on it (Owner/local user — not a UI Cloud-only login)
+- An MQTT broker that Home Assistant uses (e.g. the Mosquitto add-on)
+
+## Quick start
+
+```bash
+git clone https://github.com/Tommo-101/UPAQ-MQTT.git
+cd UPAQ-MQTT
+cp .env.example .env
+$EDITOR .env            # fill in your Protect + MQTT details
+docker compose up -d --build
+docker compose logs -f  # watch it connect and publish
+```
+
+The entities appear in Home Assistant under **Settings → Devices & Services →
+MQTT** within a few seconds.
+
+## Configuration
+
+All config is via environment variables (`.env`):
+
+| Variable | Required | Default | Notes |
+|----------|----------|---------|-------|
+| `PROTECT_HOST` | yes | — | Controller IP/hostname |
+| `PROTECT_USER` | yes | — | Local Protect username |
+| `PROTECT_PASS` | yes | — | Local Protect password |
+| `MQTT_HOST` | yes | — | Broker IP/hostname |
+| `MQTT_PORT` | no | `1883` | Broker port |
+| `MQTT_USER` | no | — | Broker username (omit for anonymous) |
+| `MQTT_PASS` | no | — | Broker password |
+| `DISCOVERY_PREFIX` | no | `homeassistant` | HA discovery prefix |
+
+## How it works
+
+`bridge.py` logs in, reads `/proxy/protect/api/bootstrap` for initial state,
+then connects to Protect's `/proxy/protect/ws/updates` WebSocket and
+republishes to MQTT on every change (event-driven, ~instant). Control changes
+from Home Assistant are `PATCH`ed back to the sensor.
+
+## Notes & caveats
+
+- **`ringLedMetric` mapping** is `0 = CO2`, `1 = Air Quality` (verified on fw
+  1.0.12). If a future firmware differs, flip `LED_METRIC_OPTIONS` in
+  `bridge.py`.
+- **No NOx** is published — fw 1.0.12 doesn't expose a `nox` field despite the
+  spec sheet. It's already mapped, so it'll appear automatically if added.
+- **Alert thresholds** default to `null` (device defaults). HA can set a value
+  but can't clear it back to `null`; reset those in the UniFi app if needed.
+- **Security:** use a **dedicated** Protect local user and a dedicated MQTT
+  user for this bridge, scoped minimally. Keep your real `.env` out of git
+  (it's already in `.gitignore`).
+- UniFi rate-limits logins; the bridge uses exponential backoff so a failed
+  login can't storm the controller.

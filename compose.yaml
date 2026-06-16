@@ -1,0 +1,7 @@
+services:
+  up-airquality-mqtt:
+    build: .
+    image: up-airquality-mqtt
+    container_name: up-airquality-mqtt
+    restart: unless-stopped
+    env_file: .env
