@@ -83,3 +83,9 @@ from Home Assistant are `PATCH`ed back to the sensor.
   (it's already in `.gitignore`).
 - UniFi rate-limits logins; the bridge uses exponential backoff so a failed
   login can't storm the controller.
+
+## Credits
+
+Built by [Tommo-101](https://github.com/Tommo-101), with the API
+reverse-engineering and implementation done together with
+[Claude Code](https://claude.com/claude-code) (Anthropic).
