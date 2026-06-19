@@ -84,9 +84,7 @@ def normalized_mac(device):
 
 
 def discovery_device_block(device, display_name=None):
-    mac = require_sensor_slug(device)
     dev_block = {
-        "identifiers": [f"up_airquality_{mac}"],
         "name": display_name or device_name(device),
         "manufacturer": "Ubiquiti",
         "model": device.get("type", "UP-AirQuality"),
