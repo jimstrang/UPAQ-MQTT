@@ -63,7 +63,38 @@ def sensor_slug(device):
             value_slug = slug(value)
             if value_slug:
                 return value_slug
-    return "unknown"
+    return None
+
+
+def require_sensor_slug(device):
+    device_slug = sensor_slug(device)
+    if not device_slug:
+        raise ValueError("Cannot publish discovery without a usable mac, id, or name")
+    return device_slug
+
+
+def normalized_mac(device):
+    value = device.get("mac")
+    if not value:
+        return None
+    mac = str(value).strip().lower().replace(":", "").replace("-", "").replace(".", "")
+    if len(mac) != 12 or any(ch not in "0123456789abcdef" for ch in mac):
+        return None
+    return ":".join(mac[i:i + 2] for i in range(0, 12, 2))
+
+
+def discovery_device_block(device, display_name=None):
+    mac = require_sensor_slug(device)
+    dev_block = {
+        "identifiers": [f"up_airquality_{mac}"],
+        "name": display_name or device_name(device),
+        "manufacturer": "Ubiquiti",
+        "model": device.get("type", "UP-AirQuality"),
+        "sw_version": device.get("firmwareVersion"),
+    }
+    if mac_connection := normalized_mac(device):
+        dev_block["connections"] = [["mac", mac_connection]]
+    return dev_block
 
 
 def airquality_sensors(sensors):
@@ -86,7 +117,7 @@ def discovery_device_name(device, duplicate_names):
     name = device_name(device)
     if name not in duplicate_names:
         return name
-    suffix = sensor_slug(device)[-6:]
+    suffix = (sensor_slug(device) or "")[-6:]
     return f"{name} ({suffix})" if suffix else name
 
 
@@ -218,18 +249,12 @@ def deep_merge(base, delta):
 def publish_discovery(client, prefix, device, aq, display_name=None):
     """Publish one HA discovery config per present air-quality metric.
     Returns (state_topic, avail_topic)."""
-    mac = sensor_slug(device)
+    mac = require_sensor_slug(device)
     node = f"protect_air_quality_{mac}"
     state_topic = f"up_airquality/{mac}/state"
     avail_topic = BRIDGE_AVAIL_TOPIC
 
-    dev_block = {
-        "identifiers": [f"up_airquality_{mac}"],
-        "name": display_name or device_name(device),
-        "manufacturer": "Ubiquiti",
-        "model": device.get("type", "UP-AirQuality"),
-        "sw_version": device.get("firmwareVersion"),
-    }
+    dev_block = discovery_device_block(device, display_name)
 
     for key in aq:
         meta = METRICS.get(key)
@@ -261,16 +286,10 @@ def publish_discovery(client, prefix, device, aq, display_name=None):
 
 def publish_control_discovery(client, prefix, device, avail_topic, display_name=None):
     """Publish HA discovery for the LED control entities. Returns topic dict."""
-    mac = sensor_slug(device)
+    mac = require_sensor_slug(device)
     node = f"protect_air_quality_{mac}"
     base = f"up_airquality/{mac}"
-    dev_block = {
-        "identifiers": [f"up_airquality_{mac}"],  # must match sensor entities
-        "name": display_name or device_name(device),
-        "manufacturer": "Ubiquiti",
-        "model": device.get("type", "UP-AirQuality"),
-        "sw_version": device.get("firmwareVersion"),
-    }
+    dev_block = discovery_device_block(device, display_name)
     t = {
         "brightness_cmd":   f"{base}/led_brightness/set",
         "brightness_state": f"{base}/led_brightness/state",
@@ -611,6 +630,10 @@ def main():
                     print("Skipping UP-AirQuality sensor without id", flush=True)
                     continue
                 mac = sensor_slug(device)
+                if not mac:
+                    print("Skipping UP-AirQuality sensor without usable mac/id/name",
+                          flush=True)
+                    continue
                 display_name = discovery_device_name(device, duplicate_names)
                 state_topic, avail_topic = publish_discovery(
                     client, prefix, device, aq, display_name)
