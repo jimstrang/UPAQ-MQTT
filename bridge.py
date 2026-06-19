@@ -101,6 +101,8 @@ def airquality_sensors(sensors):
         sensors = sensors.get("data") or sensors.get("sensors") or [sensors]
     found = []
     for s in sensors:
+        if s.get("type") != "UP-AirQuality":
+            continue
         aq = s.get("airQuality")
         if isinstance(aq, dict) and aq:
             found.append((s, aq))
