@@ -38,14 +38,14 @@ import websocket  # websocket-client
 # keys (e.g. a firmware that adds "nox") still get published as raw state.
 METRICS = {
     "aqi":         ("AQI",         "aqi",            None),
-    "vape":        ("Vape Index",  None,             None),
+    "vape":        ("Vape Index",  None,             "%"),
     "co2":         ("CO2",         "carbon_dioxide", "ppm"),
-    "tvoc":        ("TVOC",        None,             None),
-    "voc":         ("VOC Index",   None,             None),
+    "tvoc":        ("TVOC Index",  None,             "idx"),
+    "voc":         ("VOC Index",   None,             "idx"),
     "nox":         ("NOx Index",   None,             None),
     "pm1p0":       ("PM1.0",       "pm1",            "µg/m³"),
     "pm2p5":       ("PM2.5",       "pm25",           "µg/m³"),
-    "pm4p0":       ("PM4.0",       None,             "µg/m³"),
+    "pm4p0":       ("PM4.0",       "pm4",            "µg/m³"),
     "pm10p0":      ("PM10",        "pm10",           "µg/m³"),
     "temperature": ("Temperature", "temperature",    "°C"),
     "humidity":    ("Humidity",    "humidity",       "%"),

@@ -15,8 +15,9 @@ Use this in the meantime; once native support lands you can switch over.
 
 One Home Assistant device per adopted UP-AirQuality sensor, each with:
 
-**Sensors** — CO₂, AQI, Vape Index, VOC Index, TVOC, PM1.0, PM2.5, PM4.0,
-PM10, Temperature, Humidity (each with a `status` attribute, e.g. `neutral`).
+**Sensors** — CO₂, AQI, Vape Index (%), VOC Index (idx), TVOC Index (idx),
+PM1.0, PM2.5, PM4.0, PM10, Temperature, Humidity (each with a `status`
+attribute, e.g. `neutral`).
 
 **Controls** (config entities):
 - LED Brightness (0–100) and LED Metric (Air Quality / CO₂)
