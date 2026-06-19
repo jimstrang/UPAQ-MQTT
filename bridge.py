@@ -52,19 +52,42 @@ METRICS = {
 }
 
 
-def slug(mac):
-    return mac.replace(":", "").lower()
+def slug(value):
+    return "".join(ch for ch in str(value).lower() if ch.isalnum())
 
 
-def first_aq_sensor(sensors):
-    """Return (device, airQuality dict) for the first UP-AirQuality found."""
+def sensor_slug(device):
+    for key in ("mac", "id", "name"):
+        value = device.get(key)
+        if value:
+            value_slug = slug(value)
+            if value_slug:
+                return value_slug
+    return "unknown"
+
+
+def airquality_sensors(sensors):
+    """Return [(device, airQuality dict), ...] for all UP-AirQuality sensors."""
     if not isinstance(sensors, list):
         sensors = sensors.get("data") or sensors.get("sensors") or [sensors]
+    found = []
     for s in sensors:
         aq = s.get("airQuality")
         if isinstance(aq, dict) and aq:
-            return s, aq
-    return None, None
+            found.append((s, aq))
+    return found
+
+
+def device_name(device):
+    return device.get("name") or "Protect Air Quality"
+
+
+def discovery_device_name(device, duplicate_names):
+    name = device_name(device)
+    if name not in duplicate_names:
+        return name
+    suffix = sensor_slug(device)[-6:]
+    return f"{name} ({suffix})" if suffix else name
 
 
 # ringLedMetric integer <-> HA select option.
@@ -89,6 +112,7 @@ THRESHOLD_METRICS = {
     "temperature": ("Temperature", "°C",  -20,    60,  1),
 }
 THRESHOLD_BOUNDS = {"low": "lowThreshold", "high": "highThreshold"}
+BRIDGE_AVAIL_TOPIC = "up_airquality/bridge/availability"
 
 
 def env(name, default=None, required=False):
@@ -191,17 +215,17 @@ def deep_merge(base, delta):
             base[k] = v
 
 
-def publish_discovery(client, prefix, device, aq):
+def publish_discovery(client, prefix, device, aq, display_name=None):
     """Publish one HA discovery config per present air-quality metric.
     Returns (state_topic, avail_topic)."""
-    mac = slug(device.get("mac", "unknown"))
+    mac = sensor_slug(device)
     node = f"protect_air_quality_{mac}"
     state_topic = f"up_airquality/{mac}/state"
-    avail_topic = f"up_airquality/{mac}/availability"
+    avail_topic = BRIDGE_AVAIL_TOPIC
 
     dev_block = {
         "identifiers": [f"up_airquality_{mac}"],
-        "name": device.get("name", "Protect Air Quality"),
+        "name": display_name or device_name(device),
         "manufacturer": "Ubiquiti",
         "model": device.get("type", "UP-AirQuality"),
         "sw_version": device.get("firmwareVersion"),
@@ -235,14 +259,14 @@ def publish_discovery(client, prefix, device, aq):
     return state_topic, avail_topic
 
 
-def publish_control_discovery(client, prefix, device, avail_topic):
+def publish_control_discovery(client, prefix, device, avail_topic, display_name=None):
     """Publish HA discovery for the LED control entities. Returns topic dict."""
-    mac = slug(device.get("mac", "unknown"))
+    mac = sensor_slug(device)
     node = f"protect_air_quality_{mac}"
     base = f"up_airquality/{mac}"
     dev_block = {
         "identifiers": [f"up_airquality_{mac}"],  # must match sensor entities
-        "name": device.get("name", "Protect Air Quality"),
+        "name": display_name or device_name(device),
         "manufacturer": "Ubiquiti",
         "model": device.get("type", "UP-AirQuality"),
         "sw_version": device.get("firmwareVersion"),
@@ -425,6 +449,29 @@ def publish_diag_state(client, topics, device):
                    "ON" if update_avail else "OFF", qos=1, retain=True)
 
 
+def publish_state(client, sensor_ctx):
+    device = sensor_ctx["device"]
+    payload = {}
+    for k, v in device["airQuality"].items():
+        if isinstance(v, dict):
+            payload[k] = v.get("value")
+            payload[f"{k}_status"] = v.get("status")
+    client.publish(sensor_ctx["state_topic"], json.dumps(payload), qos=0, retain=False)
+    client.publish(sensor_ctx["avail_topic"], "online", qos=1, retain=True)
+    print(f"Published {sensor_ctx['mac']}: {payload}", flush=True)
+
+
+def command_subscriptions(sensor_contexts):
+    subs = []
+    for sensor_ctx in sensor_contexts:
+        topics = sensor_ctx["topics"]
+        subs.extend((topics[k], 0) for k in
+                    ("brightness_cmd", "metric_cmd", "status_cmd",
+                     "night_cmd", "night_bri_cmd"))
+        subs.append((f"{topics['base']}/thresh/+/+/set", 0))
+    return subs
+
+
 def main():
     host = env("PROTECT_HOST", required=True)
     user = env("PROTECT_USER", required=True)
@@ -435,142 +482,173 @@ def main():
     mqtt_pass = env("MQTT_PASS")
     prefix = env("DISCOVERY_PREFIX", "homeassistant")
 
-    # Shared mutable context so the MQTT command callback always uses the
-    # current token/csrf/topics (both refresh on every reconnect).
-    ctx = {"host": host, "token": None, "csrf": None, "sensor_id": None,
-           "device": None, "topics": None}
+    # Callback threads grab one complete snapshot so reconnects cannot expose
+    # mixed old/new token and sensor maps.
+    ctx = {"snapshot": {"host": host, "token": None, "csrf": None,
+                        "sensors_by_id": {}, "sensors_by_mac": {}}}
 
     def on_mqtt_message(client, userdata, msg):
-        topics = ctx["topics"]
-        if not topics:
+        parts = msg.topic.split("/")
+        if len(parts) < 3 or parts[0] != "up_airquality":
             return
+        snapshot = ctx["snapshot"]
+        sensor_ctx = snapshot["sensors_by_mac"].get(parts[1])
+        if not sensor_ctx:
+            return
+        topics = sensor_ctx["topics"]
+        device = sensor_ctx["device"]
+        sensor_id = sensor_ctx["id"]
         payload = msg.payload.decode(errors="replace").strip()
         try:
             if msg.topic == topics["brightness_cmd"]:
                 val = max(0, min(100, int(float(payload))))
-                patch_sensor(ctx["host"], ctx["token"], ctx["csrf"],
-                             ctx["sensor_id"], {"airQualitySettings":
-                                                {"ringLedBrightness": val}})
-                ctx["device"]["airQualitySettings"]["ringLedBrightness"] = val
+                patch_sensor(snapshot["host"], snapshot["token"], snapshot["csrf"],
+                             sensor_id, {"airQualitySettings":
+                                         {"ringLedBrightness": val}})
+                device.setdefault("airQualitySettings", {})["ringLedBrightness"] = val
                 client.publish(topics["brightness_state"], val, qos=1, retain=True)
-                print(f"LED brightness -> {val}", flush=True)
+                print(f"{sensor_ctx['mac']} LED brightness -> {val}", flush=True)
             elif msg.topic == topics["metric_cmd"]:
                 if payload not in LED_METRIC_OPTIONS:
                     print(f"Ignoring unknown metric option: {payload}", flush=True)
                     return
                 val = LED_METRIC_OPTIONS[payload]
-                patch_sensor(ctx["host"], ctx["token"], ctx["csrf"],
-                             ctx["sensor_id"], {"airQualitySettings":
-                                                {"ringLedMetric": val}})
-                ctx["device"]["airQualitySettings"]["ringLedMetric"] = val
+                patch_sensor(snapshot["host"], snapshot["token"], snapshot["csrf"],
+                             sensor_id, {"airQualitySettings":
+                                         {"ringLedMetric": val}})
+                device.setdefault("airQualitySettings", {})["ringLedMetric"] = val
                 client.publish(topics["metric_state"], payload, qos=1, retain=True)
-                print(f"LED metric -> {payload} ({val})", flush=True)
+                print(f"{sensor_ctx['mac']} LED metric -> {payload} ({val})", flush=True)
             elif msg.topic == topics["status_cmd"]:
                 on = payload.upper() == "ON"
-                patch_sensor(ctx["host"], ctx["token"], ctx["csrf"],
-                             ctx["sensor_id"], {"ledSettings": {"isEnabled": on}})
-                ctx["device"].setdefault("ledSettings", {})["isEnabled"] = on
+                patch_sensor(snapshot["host"], snapshot["token"], snapshot["csrf"],
+                             sensor_id, {"ledSettings": {"isEnabled": on}})
+                device.setdefault("ledSettings", {})["isEnabled"] = on
                 client.publish(topics["status_state"], payload.upper(),
                                qos=1, retain=True)
-                print(f"Status light -> {payload.upper()}", flush=True)
+                print(f"{sensor_ctx['mac']} Status light -> {payload.upper()}", flush=True)
             elif msg.topic == topics["night_cmd"]:
                 on = payload.upper() == "ON"
-                patch_sensor(ctx["host"], ctx["token"], ctx["csrf"],
-                             ctx["sensor_id"],
+                patch_sensor(snapshot["host"], snapshot["token"], snapshot["csrf"],
+                             sensor_id,
                              {"airQualitySettings": {"nightModeEnabled": on}})
-                ctx["device"]["airQualitySettings"]["nightModeEnabled"] = on
+                device.setdefault("airQualitySettings", {})["nightModeEnabled"] = on
                 client.publish(topics["night_state"], payload.upper(),
                                qos=1, retain=True)
-                print(f"Night mode -> {payload.upper()}", flush=True)
+                print(f"{sensor_ctx['mac']} Night mode -> {payload.upper()}", flush=True)
             elif msg.topic == topics["night_bri_cmd"]:
                 val = max(0, min(100, int(float(payload))))
-                patch_sensor(ctx["host"], ctx["token"], ctx["csrf"],
-                             ctx["sensor_id"],
+                patch_sensor(snapshot["host"], snapshot["token"], snapshot["csrf"],
+                             sensor_id,
                              {"airQualitySettings": {"nightModeBrightness": val}})
-                ctx["device"]["airQualitySettings"]["nightModeBrightness"] = val
+                device.setdefault("airQualitySettings", {})["nightModeBrightness"] = val
                 client.publish(topics["night_bri_state"], val, qos=1, retain=True)
-                print(f"Night mode brightness -> {val}", flush=True)
-            elif "/thresh/" in msg.topic and msg.topic.endswith("/set"):
+                print(f"{sensor_ctx['mac']} Night mode brightness -> {val}", flush=True)
+            elif len(parts) == 6 and parts[2] == "thresh" and parts[5] == "set":
                 # up_airquality/<mac>/thresh/<metric>/<bound>/set
-                parts = msg.topic.split("/")
                 metric, bound = parts[3], parts[4]
                 if metric not in THRESHOLD_METRICS or bound not in THRESHOLD_BOUNDS:
                     return
                 fval = float(payload)
                 val = int(fval) if fval.is_integer() else fval
                 key = THRESHOLD_BOUNDS[bound]
-                patch_sensor(ctx["host"], ctx["token"], ctx["csrf"],
-                             ctx["sensor_id"],
+                patch_sensor(snapshot["host"], snapshot["token"], snapshot["csrf"],
+                             sensor_id,
                              {"airQualitySettings": {f"{metric}Settings": {key: val}}})
-                aqs = ctx["device"].setdefault("airQualitySettings", {})
+                aqs = device.setdefault("airQualitySettings", {})
                 aqs.setdefault(f"{metric}Settings", {})[key] = val
                 client.publish(f"{topics['base']}/thresh/{metric}/{bound}/state",
                                val, qos=1, retain=True)
-                print(f"Threshold {metric}.{bound} -> {val}", flush=True)
+                print(f"{sensor_ctx['mac']} Threshold {metric}.{bound} -> {val}", flush=True)
         except Exception as e:
             print(f"command error on {msg.topic}: {e}", flush=True)
 
-    def command_subscriptions(topics):
-        subs = [(topics[k], 0) for k in
-                ("brightness_cmd", "metric_cmd", "status_cmd",
-                 "night_cmd", "night_bri_cmd")]
-        subs.append((f"{topics['base']}/thresh/+/+/set", 0))  # all thresholds
-        return subs
-
     def on_connect(client, userdata, flags, reason_code, properties):
         # Re-subscribe on every (re)connect once we know the topics.
-        topics = ctx["topics"]
-        if topics:
-            client.subscribe(command_subscriptions(topics))
-            print("Subscribed to LED command topics", flush=True)
+        subs = command_subscriptions(ctx["snapshot"]["sensors_by_id"].values())
+        if subs:
+            client.subscribe(subs)
+            print(f"Subscribed to {len(subs)} command topics", flush=True)
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.on_message = on_mqtt_message
     client.on_connect = on_connect
     if mqtt_user:
         client.username_pw_set(mqtt_user, mqtt_pass)
+    client.will_set(BRIDGE_AVAIL_TOPIC, "offline", qos=1, retain=True)
     client.connect(mqtt_host, mqtt_port, keepalive=60)
     client.loop_start()
     print(f"Connected to MQTT {mqtt_host}:{mqtt_port}", flush=True)
 
-    avail_topic = None
+    sensor_contexts = []
     failures = 0  # consecutive failures, drives exponential backoff
     while True:
         connected_at = None
         try:
             token, csrf, bootstrap = login_and_bootstrap(host, user, pw)
-            device, aq = first_aq_sensor(bootstrap.get("sensors", []))
-            if not aq:
+            discovered = airquality_sensors(bootstrap.get("sensors", []))
+            if not discovered:
                 print("No UP-AirQuality sensor in bootstrap; retrying", flush=True)
                 failures += 1
                 time.sleep(min(5 * 2 ** failures, 300))
                 continue
-            sensor_id = device.get("id")
             last_update_id = bootstrap.get("lastUpdateId", "")
-            print(f"Sensor id={sensor_id}  lastUpdateId={last_update_id}", flush=True)
+            print(f"Discovered {len(discovered)} UP-AirQuality sensor(s)  "
+                  f"lastUpdateId={last_update_id}", flush=True)
 
-            state_topic, avail_topic = publish_discovery(client, prefix, device, aq)
-            client.will_set(avail_topic, "offline", qos=1, retain=True)
+            name_counts = {}
+            for device, _ in discovered:
+                name = device_name(device)
+                name_counts[name] = name_counts.get(name, 0) + 1
+            duplicate_names = {name for name, count in name_counts.items() if count > 1}
 
-            ctx.update(token=token, csrf=csrf, sensor_id=sensor_id, device=device)
-            ctx["topics"] = publish_control_discovery(client, prefix, device,
-                                                       avail_topic)
+            sensor_contexts = []
+            sensors_by_id = {}
+            sensors_by_mac = {}
+            for device, aq in discovered:
+                sensor_id = device.get("id")
+                if not sensor_id:
+                    print("Skipping UP-AirQuality sensor without id", flush=True)
+                    continue
+                mac = sensor_slug(device)
+                display_name = discovery_device_name(device, duplicate_names)
+                state_topic, avail_topic = publish_discovery(
+                    client, prefix, device, aq, display_name)
+                sensor_ctx = {
+                    "id": sensor_id,
+                    "mac": mac,
+                    "device": device,
+                    "state_topic": state_topic,
+                    "avail_topic": avail_topic,
+                    "topics": publish_control_discovery(
+                        client, prefix, device, avail_topic, display_name),
+                }
+                sensor_contexts.append(sensor_ctx)
+                sensors_by_id[sensor_id] = sensor_ctx
+                sensors_by_mac[mac] = sensor_ctx
+                print(f"Sensor {mac} id={sensor_id}", flush=True)
+            if not sensor_contexts:
+                print("No usable UP-AirQuality sensors in bootstrap; retrying", flush=True)
+                failures += 1
+                time.sleep(min(5 * 2 ** failures, 300))
+                continue
+
+            ctx["snapshot"] = {
+                "host": host,
+                "token": token,
+                "csrf": csrf,
+                "sensors_by_id": sensors_by_id,
+                "sensors_by_mac": sensors_by_mac,
+            }
             # subscribe now (on_connect only fires on MQTT (re)connect)
-            client.subscribe(command_subscriptions(ctx["topics"]))
+            client.subscribe(command_subscriptions(sensor_contexts))
 
-            def publish_state():
-                payload = {}
-                for k, v in device["airQuality"].items():
-                    if isinstance(v, dict):
-                        payload[k] = v.get("value")
-                        payload[f"{k}_status"] = v.get("status")
-                client.publish(state_topic, json.dumps(payload), qos=0, retain=False)
-                client.publish(avail_topic, "online", qos=1, retain=True)
-                print(f"Published: {payload}", flush=True)
-
-            publish_state()                          # seed readings
-            publish_control_state(client, ctx["topics"], device)  # seed LED state
-            publish_diag_state(client, ctx["topics"], device)     # seed firmware
+            for sensor_ctx in sensor_contexts:
+                publish_state(client, sensor_ctx)  # seed readings
+                publish_control_state(client, sensor_ctx["topics"],
+                                      sensor_ctx["device"])  # seed LED state
+                publish_diag_state(client, sensor_ctx["topics"],
+                                   sensor_ctx["device"])  # seed firmware
 
             def on_message(ws, message):
                 if not isinstance(message, (bytes, bytearray)):
@@ -583,18 +661,22 @@ def main():
                 if len(frames) < 2:
                     return
                 action, delta = frames[0], frames[1]
-                if action.get("modelKey") != "sensor" or action.get("id") != sensor_id:
+                if action.get("modelKey") != "sensor":
                     return
+                sensor_ctx = ctx["snapshot"]["sensors_by_id"].get(action.get("id"))
+                if not sensor_ctx:
+                    return
+                device = sensor_ctx["device"]
                 if "airQuality" in delta:
                     deep_merge(device, delta)
-                    publish_state()
+                    publish_state(client, sensor_ctx)
                 if "airQualitySettings" in delta or "ledSettings" in delta:
                     deep_merge(device, delta)  # changed elsewhere (app)
-                    publish_control_state(client, ctx["topics"], device)
+                    publish_control_state(client, sensor_ctx["topics"], device)
                 if any(k in delta for k in ("firmwareVersion", "fwUpdateState",
                                             "latestFirmwareVersion")):
                     deep_merge(device, delta)
-                    publish_diag_state(client, ctx["topics"], device)
+                    publish_diag_state(client, sensor_ctx["topics"], device)
 
             def on_open(ws):
                 nonlocal connected_at
@@ -618,8 +700,10 @@ def main():
         except Exception as e:
             print(f"loop error: {e}", flush=True)
         finally:
-            if avail_topic:
-                client.publish(avail_topic, "offline", qos=1, retain=True)
+            try:
+                client.publish(BRIDGE_AVAIL_TOPIC, "offline", qos=1, retain=True)
+            except Exception as e:
+                print(f"availability publish error: {e}", flush=True)
 
         # Exponential backoff. Reset only if the WS stayed up a healthy while,
         # so a failing login can't turn into a 5s reconnect/login storm.

@@ -1,9 +1,9 @@
 # UniFi Protect Air Quality → MQTT
 
-A tiny bridge that pulls readings from the **Ubiquiti UP-AirQuality** (Vape
-Detection & Air Quality Sensor) out of UniFi Protect and publishes them to MQTT
-using **Home Assistant MQTT Discovery** — so the sensor and its LED controls
-show up in Home Assistant automatically.
+A tiny bridge that pulls readings from one or more **Ubiquiti UP-AirQuality**
+(Vape Detection & Air Quality Sensor) devices out of UniFi Protect and
+publishes them to MQTT using **Home Assistant MQTT Discovery** — so each sensor
+and its LED controls show up in Home Assistant automatically.
 
 It exists because, as of mid-2026, the native Home Assistant `unifiprotect`
 integration doesn't surface this device's data yet (the values stream over
@@ -13,7 +13,7 @@ Use this in the meantime; once native support lands you can switch over.
 
 ## What you get in Home Assistant
 
-One device, **Protect Air Quality**, with:
+One Home Assistant device per adopted UP-AirQuality sensor, each with:
 
 **Sensors** — CO₂, AQI, Vape Index, VOC Index, TVOC, PM1.0, PM2.5, PM4.0,
 PM10, Temperature, Humidity (each with a `status` attribute, e.g. `neutral`).
@@ -29,7 +29,7 @@ PM10, Temperature, Humidity (each with a `status` attribute, e.g. `neutral`).
 ## Requirements
 
 - Docker + Docker Compose
-- A UniFi Protect controller with the UP-AirQuality adopted, and a **local
+- A UniFi Protect controller with one or more UP-AirQuality sensors adopted, and a **local
   account** on it (Owner/local user — not a UI Cloud-only login)
 - An MQTT broker that Home Assistant uses (e.g. the Mosquitto add-on)
 
@@ -66,8 +66,11 @@ All config is via environment variables (`.env`):
 
 `bridge.py` logs in, reads `/proxy/protect/api/bootstrap` for initial state,
 then connects to Protect's `/proxy/protect/ws/updates` WebSocket and
-republishes to MQTT on every change (event-driven, ~instant). Control changes
-from Home Assistant are `PATCH`ed back to the sensor.
+republishes to MQTT on every change (event-driven, ~instant). Each discovered
+UP-AirQuality sensor gets its own state and control topics based on its device
+MAC, while all entities share one bridge availability topic for MQTT Last Will
+handling. Control changes from Home Assistant are `PATCH`ed back to the
+matching sensor.
 
 ## Notes & caveats
 
@@ -78,6 +81,10 @@ from Home Assistant are `PATCH`ed back to the sensor.
   spec sheet. It's already mapped, so it'll appear automatically if added.
 - **Alert thresholds** default to `null` (device defaults). HA can set a value
   but can't clear it back to `null`; reset those in the UniFi app if needed.
+- If multiple sensors have the same Protect name, Home Assistant discovery
+  appends a short MAC/id suffix to the duplicate device names. MQTT topics,
+  object IDs, and unique IDs are always based on the device MAC/id, not the
+  display name.
 - **Security:** use a **dedicated** Protect local user and a dedicated MQTT
   user for this bridge, scoped minimally. Keep your real `.env` out of git
   (it's already in `.gitignore`).
