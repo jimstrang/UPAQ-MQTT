@@ -1,5 +1,7 @@
 # UniFi Protect Air Quality → MQTT
 
+[![CI](https://github.com/Tommo-101/UPAQ-MQTT/actions/workflows/ci.yml/badge.svg)](https://github.com/Tommo-101/UPAQ-MQTT/actions/workflows/ci.yml)
+
 A tiny bridge that pulls readings from one or more **Ubiquiti UP-AirQuality**
 (Vape Detection & Air Quality Sensor) devices out of UniFi Protect and
 publishes them to MQTT using **Home Assistant MQTT Discovery** — so each sensor
