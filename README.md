@@ -48,12 +48,12 @@ docker compose logs -f  # watch it connect and publish
 The entities appear in Home Assistant under **Settings → Devices & Services →
 MQTT** within a few seconds.
 
-Discovery identifies the Home Assistant device by the sensor's MAC address as a
-device-registry connection. If Home Assistant already has a UniFi Protect device
-with the same MAC connection, newly discovered MQTT entities can attach to that
-existing device instead of creating a separate MQTT device. Entity `unique_id`s
-and MQTT topics remain stable and MAC/id based, but the MQTT discovery device
-block intentionally does not publish a separate MQTT-only device identifier.
+Discovery publishes the sensor's MAC address as a device-registry connection, so
+if Home Assistant already has a UniFi Protect device with the same MAC, the MQTT
+entities attach to that existing device instead of creating a separate one. A
+stable MQTT identifier is also published as a fallback anchor, so the device is
+always valid even if a MAC isn't available. Entity `unique_id`s and MQTT topics
+remain stable and MAC/id based.
 
 ## Configuration
 

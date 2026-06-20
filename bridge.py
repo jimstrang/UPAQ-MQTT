@@ -90,6 +90,11 @@ def discovery_device_block(device, display_name=None):
         "model": device.get("type", "UP-AirQuality"),
         "sw_version": device.get("firmwareVersion"),
     }
+    # A stable identifier guarantees the device block always has an anchor (HA
+    # requires identifiers or connections). The mac connection is kept too, so
+    # entities still attach to a matching native UniFi Protect device.
+    if device_slug := sensor_slug(device):
+        dev_block["identifiers"] = [f"up_airquality_{device_slug}"]
     if mac_connection := normalized_mac(device):
         dev_block["connections"] = [["mac", mac_connection]]
     return dev_block
