@@ -33,7 +33,7 @@ jobs:
         run: |
           git fetch origin '+refs/tags/*:refs/tags/*'
           git remote add upstream https://github.com/Tommo-101/UPAQ-MQTT.git
-          git fetch upstream main --tags
+          git fetch upstream '+refs/heads/main:refs/remotes/upstream/main' --tags
 
       - name: Detect upstream changes
         id: detect
