@@ -1,0 +1,120 @@
+name: Sync Upstream
+
+"on":
+  workflow_dispatch:
+  schedule:
+    - cron: "17 10 * * *"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/jimstrang/upaq-mqtt
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_changed: ${{ steps.detect.outputs.upstream_changed }}
+      new_tags: ${{ steps.detect.outputs.new_tags }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git fetch origin '+refs/tags/*:refs/tags/*'
+          git remote add upstream https://github.com/Tommo-101/UPAQ-MQTT.git
+          git fetch upstream main --tags
+
+      - name: Detect upstream changes
+        id: detect
+        run: |
+          upstream_changed=false
+          if ! git merge-base --is-ancestor upstream/main HEAD; then
+            upstream_changed=true
+          fi
+
+          git ls-remote --tags origin 'refs/tags/v*' \
+            | awk '{print $2}' \
+            | sed 's#refs/tags/##' \
+            | grep -v '\^{}$' \
+            | sort -u > /tmp/origin-tags.txt || true
+          git tag -l 'v*' --sort=version:refname > /tmp/all-tags.txt
+          comm -13 /tmp/origin-tags.txt /tmp/all-tags.txt > /tmp/new-tags.txt
+
+          new_tags=$(python3 -c 'import json, pathlib; print(json.dumps([line.strip() for line in pathlib.Path("/tmp/new-tags.txt").read_text().splitlines() if line.strip()]))')
+
+          {
+            printf 'upstream_changed=%s\n' "$upstream_changed"
+            printf 'new_tags=%s\n' "$new_tags"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Merge upstream main
+        run: |
+          git checkout main
+          git merge --no-edit upstream/main
+
+      - name: Push main and version tags
+        run: |
+          git push origin main
+          git push origin 'refs/tags/v*:refs/tags/v*'
+
+  publish-main:
+    needs: sync
+    if: needs.sync.outputs.upstream_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          pull: true
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:latest
+
+  publish-new-tags:
+    needs: sync
+    if: needs.sync.outputs.new_tags != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        tag: ${{ fromJSON(needs.sync.outputs.new_tags) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.tag }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          pull: true
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:${{ matrix.tag }}

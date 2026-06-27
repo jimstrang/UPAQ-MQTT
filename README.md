@@ -50,6 +50,29 @@ docker compose logs -f  # watch it connect and publish
 The entities appear in Home Assistant under **Settings → Devices & Services →
 MQTT** within a few seconds.
 
+## Container Image
+
+The `jimstrang/UPAQ-MQTT` fork publishes a prebuilt image to GHCR for homelab
+deployments:
+
+```text
+ghcr.io/jimstrang/upaq-mqtt:latest
+ghcr.io/jimstrang/upaq-mqtt:v1.1.0
+```
+
+The image is built from this repository's Dockerfile. To publish a versioned
+tag, run the `Container` workflow manually and set `version_tag` to the desired
+release tag, for example `v1.1.0`.
+
+The `Sync Upstream` workflow runs daily and can also be started manually. It
+merges `Tommo-101/UPAQ-MQTT` `main` into this fork's `main` branch and pushes
+upstream `v*` tags into the fork. When it finds new version tags, it publishes
+the matching GHCR tags automatically.
+
+Homelab deployments should still pin an explicit version tag. Publishing a new
+GHCR tag does not update the running Arcane stack until the image tag is changed
+in `homelab-docs`.
+
 Discovery publishes the sensor's MAC address as a device-registry connection, so
 if Home Assistant already has a UniFi Protect device with the same MAC, the MQTT
 entities attach to that existing device instead of creating a separate one. A
